@@ -1,0 +1,21 @@
+# Build output
+build/
+installer/Output/
+
+# Visual Studio / MSVC
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+.vs/
+
+# Editors
+.vscode/
+*.swp
+*~
+
+# Local scratch
+samples/
+*.log

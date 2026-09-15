@@ -1,0 +1,7 @@
+# Batch files and the AE script must keep CRLF or they misbehave on Windows.
+* text=auto
+*.cmd  text eol=crlf
+*.iss  text eol=crlf
+*.jsx  text eol=crlf
+*.def  text eol=crlf
+*.png  binary
