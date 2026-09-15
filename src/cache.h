@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 // Cache layout, shared by the thumbnail DLL and the baker.
 //
@@ -44,9 +45,10 @@ bool AepBakerRunning();
 bool AepWriteJob(const std::wstring& projectPath,
                  const std::wstring& displayName = std::wstring());
 
-// Reads a queued request back. Returns false if the file is unusable.
+// Reads a queued request back: the project to open, then every file name the
+// request was made under. Returns false if the file is unusable.
 bool AepReadJob(const std::wstring& jobFile, std::wstring* projectPath,
-                std::wstring* displayName);
+                std::vector<std::wstring>* names);
 
 // Writes the project's bytes into the spool and queues a request pointing at
 // that copy. This is how a thumbnail provider asks for a bake: it is handed a
@@ -58,3 +60,13 @@ bool AepSpoolAndQueue(const unsigned char* data, size_t size,
 // True when the path sits inside the spool, i.e. the baker should delete it
 // once the frame is cached.
 bool AepIsSpooled(const std::wstring& path);
+
+// A bake that failed leaves <key>.fail beside where the frame would be, so the
+// provider can show a card instead of asking for the same doomed bake on every
+// folder view. Markers expire after a day, which gives transient failures
+// another chance.
+std::wstring AepFailMarkerForKey(const std::wstring& key);
+bool AepBakeFailedRecently(const std::wstring& key);
+
+// Whether any version of After Effects is registered on this machine.
+bool AepAfterEffectsInstalled();

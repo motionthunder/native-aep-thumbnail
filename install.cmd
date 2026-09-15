@@ -59,18 +59,15 @@ echo   aepbake.exe     baker, drives After Effects
 echo   bake_batch.jsx  the script it feeds to After Effects
 echo.
 echo COM class : HKLM, isolated in dllhost.exe (no DisableProcessIsolation)
-echo .aep/.aet : HKCU association, shadowing the dead Ardfry handler
+echo .aep/.aet : HKLM association; the previous handler is kept for uninstall
 echo Cache     : %%LOCALAPPDATA%%\AepThumb\cache
 echo.
-echo The provider is handed a stream, not a filename, so it cannot queue work
-echo itself. Bake your library once, then keep it warm:
+echo Open any folder with .aep files. Tiles turn into rendered frames on their
+echo own within a few seconds, even while After Effects is open.
 echo.
-echo     "%DEST%\aepbake.exe" --scan  "D:\YOUR\PROJECTS" -r
-echo     "%DEST%\aepbake.exe" --watch "D:\YOUR\PROJECTS" -r
-echo     "%DEST%\aepbake.exe" --status
-echo.
-echo Baking pauses while After Effects is open, so your session is untouched.
-echo Projects already browsed keep a cached blank tile; run refresh-thumbnails.cmd.
+echo Optional, to render a whole library up front:
+echo     "%DEST%\aepbake.exe" --scan "D:\YOUR\PROJECTS" -r
+echo     "%DEST%\aepbake.exe" --doctor
 
 :end
 if /i "%~1"=="elevated" (

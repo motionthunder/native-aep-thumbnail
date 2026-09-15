@@ -59,20 +59,26 @@ Baking happens once per project version. After that the tile is free forever.
 
 ## How it behaves
 
-1. You open a folder of projects.
-2. Each unbaked tile appears as a placeholder card, immediately.
-3. The provider spools a copy of every unbaked project, queues it, and starts
-   the baker.
-4. After Effects launches **once for the whole batch** and renders a frame per
-   project.
-5. Tiles become real frames as they land, and stay cached until the project is
-   edited.
-
-Baking pauses while After Effects is open, so your own session is never
-disturbed — a script sent to a running instance would execute inside it. It
-resumes on the next folder view or scan.
+1. You open a folder of projects — or save a new one from After Effects.
+2. A project that has not been rendered yet shows the standard `.aep` icon for
+   a few seconds.
+3. The provider spools a copy of every such project, queues it, and starts the
+   baker.
+4. After Effects renders a frame per project in a **separate, hidden instance**,
+   started once for the whole batch — even while you are working in your own
+   After Effects, which is never touched.
+5. The baker tells Explorer which files changed, and their tiles turn into the
+   rendered frames by themselves. No refresh, no clicks. From then on they are
+   instant, until the project is edited.
 
 There is nothing to configure and no service to run.
+
+Two things are deliberately never handed to Explorer while a frame is pending.
+A placeholder image would be written to Explorer's own thumbnail cache and then
+shown instead of the real frame, so the provider returns nothing and the
+standard icon stays up. And a project that cannot render — no compositions, or
+After Effects failing on it — is remembered for a day and shown as a metadata
+card, instead of relaunching After Effects every time its folder is opened.
 
 > **Why a spooled copy?** The shell hands a thumbnail provider an `IStream`,
 > never a filename. That is exactly what allows the provider to stay inside the
@@ -195,7 +201,7 @@ aepbake --watch <folder> [-r]    bake, then keep baking as files change
 aepbake --queue <project.aep>    bake one project
 aepbake --doctor                 check the whole setup
 aepbake --status                 cache and queue counts
-aepbake --clear                  drop cached frames so they re-bake
+aepbake --clear                  drop cached frames and failure marks so they re-bake
 aepbake --enable-scripting       turn on the After Effects setting rendering needs
 ```
 
@@ -234,6 +240,10 @@ tile it would hand to Explorer.
   and that is what gets cached. Mount the drive and run `aepbake --clear`.
   Projects built from shapes and text are unaffected.
 - The first frame of each project costs a few seconds.
+- A tile turns into its frame on its own when the file is in an open Explorer
+  window or on the desktop — that is where the baker looks to tell Explorer.
+  A file shown somewhere else, such as an Open dialog, gets its frame the next
+  time it is displayed.
 - Frames are rendered at draft quality and half resolution, then cached with
   the longest side at 1024px. Good for tiles, not a preview replacement.
 - `.aepx` (the XML project format) is not handled; the parser expects RIFX.
@@ -246,6 +256,7 @@ tile it would hand to Explorer.
 ```
 %LOCALAPPDATA%\AepThumb\
 ├─ cache\<key>.png     baked frame, longest side 1024
+├─ cache\<key>.fail    this project could not render; retried after a day
 ├─ queue\<key>.job     pending request
 ├─ spool\<key>.aep     copy awaiting a bake, deleted afterwards
 ├─ aepbake.log         what the baker did
@@ -338,6 +349,30 @@ Every one of these cost real debugging time. Measured on AE 25.6.
   deliberate busy-loop against a baseline launch.
 - Locate After Effects via `HKLM\SOFTWARE\Adobe\After Effects\<ver>\InstallPath`
   rather than guessing folder names.
+- `AfterFX.exe -m -noui -r <script>` runs the script in a **new, separate
+  instance** even when After Effects is already open. Verified with a project
+  open in the running session: the script saw an empty project of its own, a
+  second `AfterFX.exe` did the work, and the session's project was untouched.
+  Without `-m`, a script can end up in the running instance.
+- Finding "is After Effects open" by window title does not work: the title
+  carries the project name. Check for the `AfterFX.exe` process.
+
+## Explorer notes
+
+- **Any bitmap a thumbnail provider returns is cached by Explorer** and shown
+  from then on. Returning a "rendering…" placeholder therefore pins the
+  placeholder in place of the real frame. While a frame is pending, return a
+  failure: Explorer keeps the standard icon and caches nothing.
+- The shell gives a provider in the isolated host an `IStream`. Its `STATSTG`
+  (requested with `STATFLAG_DEFAULT`) carries the file's leaf name, but never
+  its folder.
+- To make an open window re-ask for one file, send
+  `SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, path)`. The folders on screen
+  come from `IShellWindows` → `IShellBrowser` → `IFolderView::GetFolder`; the
+  desktops are not in that list and have to be added separately.
+- The isolated thumbnail host (`dllhost.exe`) may still write to the user's
+  profile and start processes. That is what lets the provider queue work and
+  wake the baker without giving up process isolation.
 
 ---
 
@@ -346,7 +381,7 @@ Every one of these cost real debugging time. Measured on AE 25.6.
 ```
 src/aep.{h,cpp}         RIFX parser and main-comp heuristic
 src/cache.{h,cpp}       content-keyed cache, queue, spool, baker mutex
-src/render.{h,cpp}      tile drawing: baked frame, or the placeholder card
+src/render.{h,cpp}      tile drawing: baked frame, or the card for unrenderable projects
 src/thumb.cpp           COM thumbnail provider, registration, spool-and-queue
 src/bake.cpp            aepbake.exe: queue, batching, watch, doctor, AE setting
 src/version.h           version number and publisher, shared by the resources

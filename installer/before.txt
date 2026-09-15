@@ -13,7 +13,8 @@ first time a project is seen, After Effects quietly renders one frame of it in
 the background. That takes a few seconds; after that the preview is instant
 and stays until the project is edited.
 
-Rendering pauses while After Effects is open, so your work is never disturbed.
+Rendering happens in a separate, hidden After Effects, so it keeps working
+while you are in your own After Effects - and never touches your open project.
 
 
 YOU NEED

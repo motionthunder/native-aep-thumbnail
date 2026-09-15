@@ -190,24 +190,54 @@ bool AepWriteJob(const std::wstring& projectPath, const std::wstring& displayNam
 }
 
 bool AepReadJob(const std::wstring& jobFile, std::wstring* projectPath,
-                std::wstring* displayName) {
+                std::vector<std::wstring>* names) {
     std::vector<unsigned char> raw;
     if (!ReadWhole(jobFile, raw) || raw.empty()) return false;
 
     std::string text(reinterpret_cast<char*>(&raw[0]), raw.size());
-    size_t nl = text.find('\n');
-    std::string first = (nl == std::string::npos) ? text : text.substr(0, nl);
-    std::string second = (nl == std::string::npos) ? std::string() : text.substr(nl + 1);
-    while (!first.empty() && (first[first.size() - 1] == '\r')) first.erase(first.size() - 1);
-    while (!second.empty() && (second[second.size() - 1] == '\r' ||
-                               second[second.size() - 1] == '\n'))
-        second.erase(second.size() - 1);
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t nl = text.find('\n', start);
+        std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        while (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+        if (!line.empty()) lines.push_back(line);
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
 
-    if (first.empty()) return false;
-    if (projectPath) *projectPath = WideOf(first);
-    if (displayName) *displayName = WideOf(second);
+    if (lines.empty()) return false;
+    if (projectPath) *projectPath = WideOf(lines[0]);
+    if (names) {
+        names->clear();
+        for (size_t i = 1; i < lines.size(); ++i) names->push_back(WideOf(lines[i]));
+    }
     return true;
 }
+
+namespace {
+
+// Adds a file name to a request that is already queued. Copies of one project
+// share a key and so a single request, but each copy may carry its own name,
+// and every one of them needs telling when the frame is ready.
+void AddNameToJob(const std::wstring& jobFile, const std::wstring& name) {
+    if (name.empty()) return;
+    std::wstring project;
+    std::vector<std::wstring> names;
+    if (!AepReadJob(jobFile, &project, &names)) return;
+    for (size_t i = 0; i < names.size(); ++i)
+        if (_wcsicmp(names[i].c_str(), name.c_str()) == 0) return;
+
+    HANDLE h = CreateFileW(jobFile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;    // the baker just took it
+    std::string line = "\n" + Utf8Of(name);
+    DWORD wrote = 0;
+    WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &wrote, NULL);
+    CloseHandle(h);
+}
+
+}  // namespace
 
 bool AepSpoolAndQueue(const unsigned char* data, size_t size,
                       const std::wstring& displayName) {
@@ -223,7 +253,10 @@ bool AepSpoolAndQueue(const unsigned char* data, size_t size,
     if (GetFileAttributesW(cached.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
 
     std::wstring job = AepQueueDir() + L"\\" + key + L".job";
-    if (GetFileAttributesW(job.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    if (GetFileAttributesW(job.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        AddNameToJob(job, displayName);
+        return false;
+    }
 
     std::wstring spool = AepSpoolDir() + L"\\" + key + L".aep";
     if (GetFileAttributesW(spool.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -258,6 +291,37 @@ bool AepSpoolAndQueue(const unsigned char* data, size_t size,
     }
 
     return WriteJobFile(key, spool, displayName);
+}
+
+std::wstring AepFailMarkerForKey(const std::wstring& key) {
+    std::wstring dir = AepCacheDir();
+    if (key.empty() || dir.empty()) return std::wstring();
+    return dir + L"\\" + key + L".fail";
+}
+
+bool AepBakeFailedRecently(const std::wstring& key) {
+    std::wstring marker = AepFailMarkerForKey(key);
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (marker.empty() ||
+        !GetFileAttributesExW(marker.c_str(), GetFileExInfoStandard, &fad))
+        return false;
+
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a, b;
+    a.LowPart = now.dwLowDateTime;               a.HighPart = now.dwHighDateTime;
+    b.LowPart = fad.ftLastWriteTime.dwLowDateTime; b.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+    const ULONGLONG kDay = 24ull * 60 * 60 * 10000000ull;   // FILETIME ticks
+    return a.QuadPart >= b.QuadPart && (a.QuadPart - b.QuadPart) < kDay;
+}
+
+bool AepAfterEffectsInstalled() {
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Adobe\\After Effects", 0,
+                      KEY_READ | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
+        return false;
+    RegCloseKey(key);
+    return true;
 }
 
 bool AepIsSpooled(const std::wstring& path) {

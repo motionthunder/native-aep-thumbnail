@@ -38,6 +38,16 @@ static const ULONGLONG kMaxProjectBytes = 384ull * 1024 * 1024;
 static HINSTANCE g_module = NULL;
 static LONG      g_objects = 0;
 
+static bool QueueHasWork() {
+    std::wstring dir = AepQueueDir();
+    if (dir.empty()) return false;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.job").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return true;
+}
+
 // Records only things that went wrong. This runs inside the shell's thumbnail
 // host, where there is nowhere to report an error to, so a one-line note in
 // the cache folder is the only way a problem here is ever visible.
@@ -169,14 +179,26 @@ public:
             if (!AepParse(&data_[0], data_.size(), proj)) return E_FAIL;
 
             // Keyed on the bytes we were handed, so no filename is needed.
-            std::wstring baked = AepCachedFrameForKey(
-                AepCacheKeyFromContent(&data_[0], data_.size()));
+            const std::wstring key = AepCacheKeyFromContent(&data_[0], data_.size());
+            std::wstring baked = AepCachedFrameForKey(key);
 
-            // Nothing baked yet: ask for it. The card returned below is a
-            // placeholder; once the frame lands the baker tells the shell to
-            // ask again.
-            if (GetFileAttributesW(baked.c_str()) == INVALID_FILE_ATTRIBUTES)
-                RequestBake();
+            if (GetFileAttributesW(baked.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                baked.clear();
+
+                // No frame yet but one can be made: ask for it and hand back
+                // nothing. Any bitmap returned here - even a placeholder - is
+                // written to Explorer's own thumbnail cache and would then be
+                // shown instead of the real frame. Failing leaves the standard
+                // icon up and caches nothing; once the frame lands the baker
+                // tells Explorer to ask again.
+                if (AepAfterEffectsInstalled() && !AepBakeFailedRecently(key)) {
+                    RequestBake();
+                    return E_PENDING;
+                }
+                // Otherwise there will be no frame - no After Effects, or the
+                // project would not render - so the metadata card is the final
+                // answer and fine to cache.
+            }
 
             HBITMAP hbm = AepRenderThumbnail(proj, baked, path_, cx);
             if (!hbm) return E_FAIL;
@@ -244,10 +266,14 @@ private:
     // refused the request simply waits for the next baker run.
     void RequestBake() {
         if (data_.empty()) return;
-        if (!AepSpoolAndQueue(&data_[0], data_.size(),
-                              name_.empty() ? path_ : name_))
-            return;                       // cached, already queued, or too big
+        AepSpoolAndQueue(&data_[0], data_.size(), name_.empty() ? path_ : name_);
+
+        // Start the baker whenever anything is waiting, not only when this call
+        // queued something new. A request left behind by an earlier run - the
+        // baker was stopped, the machine went to sleep - must not sit in the
+        // queue forever just because it was already there.
         if (AepBakerRunning()) return;
+        if (!QueueHasWork()) return;
 
         wchar_t self[MAX_PATH * 2];
         DWORD n = GetModuleFileNameW(g_module, self, ARRAYSIZE(self));

@@ -14,6 +14,8 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <shlobj.h>
+#include <exdisp.h>
+#include <shlguid.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -140,6 +142,7 @@ struct Job {
     std::wstring key;
     std::wstring project;     // real path, or a spooled copy
     std::wstring display;     // what to call it in the log
+    std::vector<std::wstring> names;   // file names it was requested under
     std::wstring comp;
 };
 
@@ -165,8 +168,8 @@ std::vector<Job> ReadQueue() {
 
         Job j;
         j.key = name.substr(0, dot);
-        if (!AepReadJob(g_queue + L"\\" + name, &j.project, &j.display)) continue;
-        if (j.display.empty()) j.display = j.project;
+        if (!AepReadJob(g_queue + L"\\" + name, &j.project, &j.names)) continue;
+        j.display = j.names.empty() ? j.project : j.names[0];
 
         // The key is the hash of the project's bytes, so a request whose file
         // has since been edited or replaced no longer matches and is dropped.
@@ -418,10 +421,9 @@ bool ProcessRunning(const wchar_t* exeName) {
 }
 
 bool AfterFxRunning() {
-    // A script sent to a running instance would execute inside the user's own
-    // session and disrupt it, so the baker stands down instead. Checked by
-    // process, not by window: the main window's title carries the project
-    // name, so no fixed title or guessed class name matches it reliably.
+    // Only reported, never waited on: baking starts its own instance with -m.
+    // Checked by process, not by window - the main window's title carries the
+    // project name, so no fixed title or guessed class name matches reliably.
     return ProcessRunning(L"AfterFX.exe");
 }
 
@@ -546,7 +548,13 @@ bool RunAfterFx(const std::wstring& script) {
     if (scriptArg.find(L' ') != std::wstring::npos)
         Log(L"warning: script path still contains a space: " + scriptArg);
 
-    std::wstring cmd = L"\"" + afx + L"\" -noui -r " + scriptArg;
+    // -m starts a separate instance instead of handing the script to one that
+    // is already running. Measured on AE 25.6 with a project open in the
+    // user's session: the script saw an empty project of its own, a second
+    // AfterFX.exe process did the work, and the session's project was never
+    // touched. That is what lets baking carry on while someone is working in
+    // After Effects - which is exactly when new projects get created.
+    std::wstring cmd = L"\"" + afx + L"\" -m -noui -r " + scriptArg;
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(L'\0');
 
@@ -559,8 +567,10 @@ bool RunAfterFx(const std::wstring& script) {
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
+    // Below normal priority, so a session running alongside stays responsive.
     if (!CreateProcessW(NULL, &buf[0], NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+                        CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS,
+                        NULL, NULL, &si, &pi)) {
         Log(L"could not launch After Effects");
         return false;
     }
@@ -582,11 +592,118 @@ void NotifyShell(const std::wstring& project) {
                    project.c_str(), NULL);
 }
 
-// Used when the bake came from a spooled copy and the original path is
-// unknown: ask the shell to re-read associations, which drops its cached
-// tiles for the type.
-void NotifyShellAll() {
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
+// Folders currently on screen: every open Explorer window, plus the desktops,
+// which are not Explorer windows but are where a freshly saved project often
+// lands.
+std::vector<std::wstring> VisibleFolders() {
+    std::vector<std::wstring> out;
+
+    IShellWindows* windows = NULL;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellWindows, NULL, CLSCTX_ALL,
+                                   IID_PPV_ARGS(&windows)))) {
+        long count = 0;
+        windows->get_Count(&count);
+        for (long i = 0; i < count; ++i) {
+            VARIANT index;
+            VariantInit(&index);
+            index.vt = VT_I4;
+            index.lVal = i;
+
+            IDispatch* disp = NULL;
+            if (FAILED(windows->Item(index, &disp)) || !disp) continue;
+
+            IServiceProvider* sp = NULL;
+            IShellBrowser* browser = NULL;
+            IShellView* view = NULL;
+            IFolderView* folderView = NULL;
+            IPersistFolder2* folder = NULL;
+
+            if (SUCCEEDED(disp->QueryInterface(IID_PPV_ARGS(&sp))) &&
+                SUCCEEDED(sp->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser))) &&
+                SUCCEEDED(browser->QueryActiveShellView(&view)) &&
+                SUCCEEDED(view->QueryInterface(IID_PPV_ARGS(&folderView))) &&
+                SUCCEEDED(folderView->GetFolder(IID_PPV_ARGS(&folder)))) {
+                PIDLIST_ABSOLUTE pidl = NULL;
+                if (SUCCEEDED(folder->GetCurFolder(&pidl)) && pidl) {
+                    wchar_t path[MAX_PATH * 2];
+                    if (SHGetPathFromIDListEx(pidl, path, ARRAYSIZE(path), GPFIDL_DEFAULT))
+                        out.push_back(path);
+                    CoTaskMemFree(pidl);
+                }
+            }
+
+            if (folder) folder->Release();
+            if (folderView) folderView->Release();
+            if (view) view->Release();
+            if (browser) browser->Release();
+            if (sp) sp->Release();
+            disp->Release();
+        }
+        windows->Release();
+    }
+
+    const KNOWNFOLDERID* desktops[] = { &FOLDERID_Desktop, &FOLDERID_PublicDesktop };
+    for (size_t i = 0; i < ARRAYSIZE(desktops); ++i) {
+        PWSTR p = NULL;
+        if (SUCCEEDED(SHGetKnownFolderPath(*desktops[i], 0, NULL, &p)) && p) {
+            out.push_back(p);
+            CoTaskMemFree(p);
+        }
+    }
+    return out;
+}
+
+// Tells Explorer that a project's thumbnail can now be produced.
+//
+// A request that came from Explorer arrives as a spooled copy with only the
+// file's leaf name - the shell hands the provider a stream, never a path. So
+// look for that name in every folder on screen and notify each file whose
+// bytes match the baked key; two copies of one project both update.
+void NotifyBaked(const Job& job) {
+    if (!job.project.empty() && !AepIsSpooled(job.project)) {
+        NotifyShell(job.project);
+        return;
+    }
+
+    if (job.names.empty()) return;
+
+    std::vector<std::wstring> folders = VisibleFolders();
+    std::vector<std::wstring> notified;
+    for (size_t k = 0; k < job.names.size(); ++k) {
+        const std::wstring& name = job.names[k];
+        if (name.empty() || name.find_first_of(L"\\/") != std::wstring::npos) continue;
+
+        for (size_t i = 0; i < folders.size(); ++i) {
+            std::wstring candidate = folders[i];
+            if (!candidate.empty() && candidate[candidate.size() - 1] != L'\\')
+                candidate += L"\\";
+            candidate += name;
+
+            bool seen = false;
+            for (size_t n = 0; n < notified.size(); ++n)
+                if (_wcsicmp(notified[n].c_str(), candidate.c_str()) == 0) seen = true;
+            if (seen) continue;
+
+            if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            if (AepCacheKey(candidate) != job.key) continue;
+
+            NotifyShell(candidate);
+            notified.push_back(candidate);
+        }
+    }
+}
+
+void MarkFailed(const Job& job, const std::wstring& reason) {
+    std::wstring marker = AepFailMarkerForKey(job.key);
+    if (!marker.empty()) WriteTextFile(marker, Utf8(reason));
+}
+
+// Once a request is finished, good or bad, it leaves the queue and its spooled
+// copy goes. A failure is remembered instead of retried: re-queued on every
+// folder view it would relaunch After Effects over and over.
+void FinishJob(const Job& job) {
+    DeleteFileW(QueueFileFor(job.key).c_str());
+    if (!job.project.empty() && AepIsSpooled(job.project)) DeleteFileW(job.project.c_str());
 }
 
 int RunDaemon() {
@@ -617,6 +734,9 @@ int RunDaemon() {
         return 1;
     }
 
+    // Finding the folders on screen goes through the shell's COM objects.
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
     for (;;) {
         // Let a burst of requests accumulate so AE starts once for the folder.
         Sleep(kCollectMs);
@@ -624,12 +744,11 @@ int RunDaemon() {
         std::vector<Job> jobs = ReadQueue();
         if (jobs.empty()) break;
 
-        if (AfterFxRunning()) {
-            Log(L"After Effects is open; leaving the queue for later");
-            break;
-        }
-
-        Log(L"baking " + std::to_wstring(jobs.size()) + L" project(s)");
+        // No standing down for an open After Effects: RunAfterFx starts a
+        // separate instance, so the user's session is left alone and a project
+        // saved from it gets its preview straight away.
+        Log(L"baking " + std::to_wstring(jobs.size()) + L" project(s)" +
+            (AfterFxRunning() ? L" alongside an open After Effects" : L""));
 
         std::string json = "{\"outDir\":\"" + JsonEscape(tmpDir) + "\",\"jobs\":[";
         for (size_t i = 0; i < jobs.size(); ++i) {
@@ -643,57 +762,52 @@ int RunDaemon() {
         DeleteFileW(resultFile.c_str());
         if (!WriteTextFile(batchFile, json)) { Log(L"could not write batch.json"); break; }
 
-        if (!RunAfterFx(script)) break;
+        if (!RunAfterFx(script)) {
+            // Could not start, or overran and was stopped. Settle the batch
+            // rather than leave it queued for the next folder view to relaunch.
+            for (size_t j = 0; j < jobs.size(); ++j) {
+                MarkFailed(jobs[j], L"After Effects could not complete the batch");
+                FinishJob(jobs[j]);
+                NotifyBaked(jobs[j]);
+            }
+            continue;
+        }
 
         std::vector<BakeResult> results = ReadResults(resultFile);
         Log(L"After Effects returned " + std::to_wstring(results.size()) + L" result(s)");
 
-        for (size_t i = 0; i < results.size(); ++i) {
-            const BakeResult& r = results[i];
-
-            std::wstring project, display;
-            for (size_t j = 0; j < jobs.size(); ++j) {
-                if (jobs[j].key == r.key) {
-                    project = jobs[j].project;
-                    display = jobs[j].display;
-                }
-            }
-
-            if (r.ok && !r.file.empty()) {
-                std::wstring png = g_cache + L"\\" + r.key + L".png";
-                if (ConvertToCache(r.file, png)) {
-                    Log(L"cached " + display);
-                    // Tell the shell to re-ask. For a spooled job we have no
-                    // original path, so nudge by extension instead.
-                    if (!project.empty() && !AepIsSpooled(project)) NotifyShell(project);
-                    else NotifyShellAll();
-                } else {
-                    Log(L"conversion failed for " + display);
-                }
-                DeleteFileW(r.file.c_str());
-            } else {
-                Log(L"bake failed for " + display + L": " + r.error);
-            }
-
-            // Drop the request either way; a failure retried forever would
-            // relaunch After Effects on every folder view.
-            DeleteFileW(QueueFileFor(r.key).c_str());
-            if (!project.empty() && AepIsSpooled(project)) DeleteFileW(project.c_str());
-        }
-
-        // Anything After Effects never reported on would loop forever.
         for (size_t j = 0; j < jobs.size(); ++j) {
-            bool seen = false;
+            const Job& job = jobs[j];
+            const BakeResult* r = NULL;
             for (size_t i = 0; i < results.size(); ++i)
-                if (results[i].key == jobs[j].key) seen = true;
-            if (!seen) {
-                Log(L"no result for " + jobs[j].display + L"; dropping request");
-                DeleteFileW(QueueFileFor(jobs[j].key).c_str());
-                if (AepIsSpooled(jobs[j].project)) DeleteFileW(jobs[j].project.c_str());
+                if (results[i].key == job.key) r = &results[i];
+
+            if (r && r->ok && !r->file.empty()) {
+                std::wstring png = g_cache + L"\\" + job.key + L".png";
+                if (ConvertToCache(r->file, png)) {
+                    DeleteFileW(AepFailMarkerForKey(job.key).c_str());
+                    Log(L"cached " + job.display);
+                } else {
+                    MarkFailed(job, L"could not convert the rendered frame");
+                    Log(L"conversion failed for " + job.display);
+                }
+                DeleteFileW(r->file.c_str());
+            } else if (r) {
+                MarkFailed(job, r->error);
+                Log(L"bake failed for " + job.display + L": " + r->error);
+            } else {
+                MarkFailed(job, L"After Effects reported nothing for this project");
+                Log(L"no result for " + job.display);
             }
+
+            FinishJob(job);
+            // Success or failure, Explorer is showing a bare icon for this file
+            // and should ask again: it now gets either the frame or the card.
+            NotifyBaked(job);
         }
     }
 
+    if (SUCCEEDED(com)) CoUninitialize();
     GdiplusShutdown(token);
     ReleaseMutex(mutex);
     CloseHandle(mutex);
@@ -834,8 +948,8 @@ void PrintUsage() {
             L"  aepbake --enable-scripting       turn on the After Effects setting\n"
             L"                                   that rendering needs\n"
             L"\n"
-            L"Baking pauses while After Effects is open, so your session is never\n"
-            L"disturbed; it resumes on the next scan or change.\n");
+            L"Baking runs in a separate hidden After Effects instance, so it carries\n"
+            L"on while you work in your own session without touching it.\n");
 }
 
 }  // namespace
@@ -900,17 +1014,22 @@ int wmain(int argc, wchar_t** argv) {
         // Frames rendered while a footage drive was offline show After Effects'
         // media-offline colour bars. Dropping them makes those projects bake
         // again once the drive is back.
-        int removed = 0;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW((g_cache + L"\\*.png").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
+        // Failure markers go too, so projects that could not render get
+        // another attempt straight away rather than after a day.
+        int removed = 0, markers = 0;
+        static const wchar_t* kPatterns[] = { L"\\*.png", L"\\*.fail" };
+        for (size_t pi = 0; pi < ARRAYSIZE(kPatterns); ++pi) {
+            WIN32_FIND_DATAW fd;
+            HANDLE h = FindFirstFileW((g_cache + kPatterns[pi]).c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
             do {
                 if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                if (DeleteFileW((g_cache + L"\\" + fd.cFileName).c_str())) ++removed;
+                if (DeleteFileW((g_cache + L"\\" + fd.cFileName).c_str()))
+                    ++(pi == 0 ? removed : markers);
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
-        wprintf(L"removed %d cached frame(s)\n", removed);
+        wprintf(L"removed %d cached frame(s) and %d failure marker(s)\n", removed, markers);
         wprintf(L"they will be baked again as folders are browsed, or run --scan\n");
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, NULL, NULL);
         return 0;
@@ -971,7 +1090,8 @@ int wmain(int argc, wchar_t** argv) {
                 CountFiles(AepSpoolDir() + L"\\*.aep"));
         wprintf(L"  baker  : %s\n", AepBakerRunning() ? L"running" : L"idle");
         wprintf(L"  AE now : %s\n",
-                AfterFxRunning() ? L"open - baking is paused" : L"closed");
+                AfterFxRunning() ? L"open - baking runs in a separate hidden instance"
+                                 : L"closed");
         return 0;
     }
 
@@ -981,7 +1101,7 @@ int wmain(int argc, wchar_t** argv) {
         wprintf(L"  pending        : %d\n", CountFiles(g_queue + L"\\*.job"));
         wprintf(L"  baker running  : %s\n", AepBakerRunning() ? L"yes" : L"no");
         wprintf(L"  After Effects  : %s\n",
-                AfterFxRunning() ? L"open (baking is paused)" : L"closed");
+                AfterFxRunning() ? L"open (baking still runs, separately)" : L"closed");
         return 0;
     }
 
