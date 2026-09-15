@@ -244,8 +244,8 @@ tile it would hand to Explorer.
   window or on the desktop — that is where the baker looks to tell Explorer.
   A file shown somewhere else, such as an Open dialog, gets its frame the next
   time it is displayed.
-- Frames are rendered at draft quality and half resolution, then cached with
-  the longest side at 1024px. Good for tiles, not a preview replacement.
+- Frames are rendered at full quality, then cached with the longest side at
+  1024px. Good for tiles, not a preview replacement.
 - `.aepx` (the XML project format) is not handled; the parser expects RIFX.
 - Projects over 256 MB are not spooled on first view — point `--scan` at them.
 
@@ -325,24 +325,30 @@ tool deliberately does not report duration.
 
 Every one of these cost real debugging time. Measured on AE 25.6.
 
-- **Never call `app.beginSuppressDialogs()` around a render.** With suppression
-  on, any project whose render would raise a warning — a missing effect,
-  offline footage — stops instantly as `USER_STOPPED` (3018) and writes
-  nothing. With suppression off the same project finishes as `ERR_STOPPED`
-  (3019) and the frame lands on disk. Test for the output file; never trust the
-  queue status.
+- **Grab a single frame with `comp.saveFrameToPng(time, file).wait()`.** The
+  call is asynchronous: it returns an object with `wait()`, `onComplete`,
+  `_isReady` and `_hasException`. Skip `wait()` and a headless instance quits
+  before the file exists, which looks exactly like "writes nothing" — that is
+  how an early version of this tool wrongly concluded it does not work.
+  `app.scheduleTask` is no substitute: under `-noui` After Effects exits as soon
+  as the script ends.
+- **The render queue plays After Effects' "render finished" sound**, even in a
+  hidden `-m -noui` instance. Metered on the same frame both ways: render queue
+  peak 0.87 from the hidden process, `saveFrameToPng` never opened an audio
+  device. It is also faster (0.7 s for a 4120×1280 frame), renders at full
+  resolution, and needs no output-module templates, whose names are translated
+  in non-English installs. Muting the process is not a fix: Windows groups
+  per-app volume by executable, so it can mute the user's own After Effects.
 - `AfterFX.exe -noui -r <script>` works, but the path after `-r` must **not**
   be quoted. Quote it and AE exits in about 5 seconds having run nothing. Pass
   the 8.3 short path so spaces survive unquoted.
-- `comp.saveFrameToPng` and `comp.saveDraftFrameToPng` exist and throw nothing,
-  but silently write no file when AE runs headless. Use the render queue.
-- An output module's `Format` is read-only through `setSettings`; the format has
-  to come from `applyTemplate`. `TIFF Sequence with Alpha` is a stock template
-  and GDI+ can decode its output.
-- Applying a **render-settings** template resets the time span. Set your
-  single-frame range *after* `applyTemplate`, or you will render the entire comp
-  (300 frames and 2.9 GB, in one memorable case).
-- A sequence output module appends a frame number, so the output path needs
+- If you do use the render queue: never call `app.beginSuppressDialogs()`
+  around it — a project that would raise a warning stops as `USER_STOPPED`
+  (3018) and writes nothing, while without suppression it ends `ERR_STOPPED`
+  (3019) *and* writes the frame, so test for the file, not the status. An output
+  module's `Format` is read-only in `setSettings` and must come from
+  `applyTemplate`; a render-settings template resets the time span, so set a
+  single-frame range after applying it; and a sequence output path needs
   `[#####]` before the extension or the final rename fails with error 784.
 - `app.exitCode` does not reach the process exit code, and a script blocked from
   writing files leaves no trace at all. To prove a script ran, time a

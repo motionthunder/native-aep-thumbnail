@@ -9,11 +9,16 @@
 // Results are rewritten after every job, so if AE dies partway the worker
 // still learns which projects succeeded.
 //
-// Two ordering rules here were learned the hard way:
-//   - a render-settings template resets the time span, so the single-frame
-//     range must be set after applyTemplate, or the whole comp renders;
-//   - a sequence output module appends a frame number, so the path needs
-//     [#####] before the extension or the final rename fails with error 784.
+// Frames come from CompItem.saveFrameToPng, not the render queue. Measured on
+// AE 25.6, rendering the same frame both ways: the render queue plays After
+// Effects' "render finished" sound (audio peak 0.87 from the hidden instance),
+// saveFrameToPng never even opens an audio device. It is also quicker, renders
+// at full resolution, and needs no output-module templates - whose names are
+// translated in non-English installs.
+//
+// The catch: saveFrameToPng is asynchronous. It returns an object with a
+// wait() method, and without wait() a headless instance quits before the
+// file is written, which looks exactly like "writes nothing".
 
 (function () {
 
@@ -124,36 +129,28 @@ function bake(job, outDir) {
         if (!comp) throw new Error('project has no comps');
         r.comp = comp.name;
 
-        var rq = app.project.renderQueue.items.add(comp);
-        rq.applyTemplate('Draft Settings');          // half res, draft quality
-        rq.timeSpanStart = frameTime(comp);
-        rq.timeSpanDuration = comp.frameDuration;
+        var out = new File(outDir + '/' + job.key + '.png');
+        if (out.exists) out.remove();
 
-        var om = rq.outputModule(1);
-        om.applyTemplate('TIFF Sequence with Alpha');
-        om.file = new File(outDir + '/' + job.key + '_[#####].tif');
+        var pending = comp.saveFrameToPng(frameTime(comp), out);
+        if (pending && typeof pending.wait === 'function') pending.wait();
 
-        app.project.renderQueue.render();
+        var failed = false;
+        try { failed = pending && pending._hasException; } catch (e) {}
+        if (failed) {
+            var why = 'saveFrameToPng failed';
+            try { why += ': ' + String(pending._exception); } catch (e) {}
+            throw new Error(why);
+        }
 
-        // A frame on disk is the only thing that matters. Projects with
-        // missing effects or footage finish as ERR_STOPPED (3019) yet still
-        // write the frame, so the status is logged, never trusted.
-        var produced = new Folder(outDir).getFiles(job.key + '_*.tif');
-        var status = 'unknown';
-        try { status = String(rq.status); } catch (e) {}
-        if (produced.length === 0)
-            throw new Error('render wrote no file (queue status ' + status + ')');
-        if (status !== '3020') r.note = 'queue status ' + status;
-        r.file = produced[0].fsName;
+        // A frame on disk is the only thing that matters.
+        if (!out.exists || out.length <= 0) throw new Error('no frame was written');
+        r.file = out.fsName;
         r.ok = true;
     } catch (e) {
         r.error = e.toString();
     }
 
-    try {
-        while (app.project && app.project.renderQueue.numItems > 0)
-            app.project.renderQueue.item(1).remove();
-    } catch (e) {}
     try {
         if (app.project) app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
     } catch (e) {}

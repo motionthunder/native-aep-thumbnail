@@ -210,10 +210,11 @@ bool GetEncoderClsid(const wchar_t* mime, CLSID* out) {
     return false;
 }
 
-// AE writes a big 16-bit TIFF with alpha; the cache wants a modest opaque PNG.
-bool ConvertToCache(const std::wstring& tiff, const std::wstring& pngOut) {
+// After Effects writes the frame at the comp's full size, with alpha; the cache
+// wants a modest opaque PNG.
+bool ConvertToCache(const std::wstring& frame, const std::wstring& pngOut) {
     bool ok = false;
-    Image* src = Image::FromFile(tiff.c_str(), FALSE);
+    Image* src = Image::FromFile(frame.c_str(), FALSE);
     if (src && src->GetLastStatus() == Ok &&
         src->GetWidth() > 0 && src->GetHeight() > 0) {
 
