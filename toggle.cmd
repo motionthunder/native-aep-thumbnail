@@ -54,7 +54,7 @@ if errorlevel 1 (
 )
 
 rem Let go of the DLL inside the shell's thumbnail host.
-taskkill /f /im dllhost.exe >nul 2>&1
+taskkill /f /fi "imagename eq dllhost.exe" /fi "modules eq aepthumb.dll" >nul 2>&1
 
 call :flush_thumbnails
 

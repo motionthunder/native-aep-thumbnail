@@ -34,7 +34,7 @@ taskkill /f /im aepbake.exe >nul 2>&1
 if exist "%DEST%\aepthumb.dll" regsvr32 /s /u "%DEST%\aepthumb.dll"
 reg delete "HKCU\Software\Classes\CLSID\{8E76F525-03F4-403B-A170-1623A5878F14}" /f >nul 2>&1
 reg delete "HKLM\Software\Classes\CLSID\{8E76F525-03F4-403B-A170-1623A5878F14}" /v DisableProcessIsolation /f >nul 2>&1
-taskkill /f /im dllhost.exe >nul 2>&1
+taskkill /f /fi "imagename eq dllhost.exe" /fi "modules eq aepthumb.dll" >nul 2>&1
 
 if not exist "%DEST%" mkdir "%DEST%"
 for %%F in (aepthumb.dll aepbake.exe bake_batch.jsx) do (

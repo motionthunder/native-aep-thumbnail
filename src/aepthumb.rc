@@ -1,0 +1,4 @@
+#define AEPT_FILE_DESC     "Native AEP Thumbnail - Explorer thumbnail handler"
+#define AEPT_ORIGINAL_NAME "aepthumb.dll"
+#define AEPT_FILETYPE      VFT_DLL
+#include "versioninfo.rc"

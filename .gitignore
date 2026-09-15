@@ -19,3 +19,4 @@ installer/Output/
 # Local scratch
 samples/
 *.log
+dist/

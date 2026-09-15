@@ -7,7 +7,7 @@ choice /c yn /m "Continue"
 if errorlevel 2 exit /b 0
 
 taskkill /f /im explorer.exe >nul 2>&1
-taskkill /f /im dllhost.exe >nul 2>&1
+taskkill /f /fi "imagename eq dllhost.exe" /fi "modules eq aepthumb.dll" >nul 2>&1
 del /f /q "%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db" 2>nul
 start "" explorer.exe
 echo Done.

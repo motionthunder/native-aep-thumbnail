@@ -15,6 +15,17 @@ the rendered frame, not an icon and not a metadata card.
   <img src="docs/example.png" alt="Three AEP files showing their rendered content as Explorer thumbnails" width="880">
 </p>
 
+## Download
+
+**[Get the installer from Releases](https://github.com/motionthunder/native-aep-thumbnail/releases/latest)** —
+`NativeAEPThumbnail-0.1.0-Setup.exe`, about 2 MB.
+
+Run it, click **Next** a few times, then open any folder with `.aep` files.
+Previews appear within a few seconds. No building, no command line.
+
+> **Windows SmartScreen** may say it *protected your PC*, because the installer
+> is not code-signed yet. Click **More info → Run anyway**.
+
 ---
 
 ## Why this does not already exist
@@ -78,7 +89,9 @@ There is nothing to configure and no service to run.
 - Adobe After Effects (any recent version; located via the registry)
 - In After Effects: **Edit → Preferences → Scripting and Expressions → "Allow
   Scripts to Write Files and Access Network"** must be enabled.
-  Without it every render fails silently.
+  Without it every render fails silently. The installer offers to switch it on
+  for you (ticked by default); from the command line it is
+  `aepbake --enable-scripting`.
 
 Without After Effects the provider still loads, but every tile stays a
 metadata card — there is nothing to render with.
@@ -106,6 +119,29 @@ AepThumb self-check
 
 ## Install
 
+### With the installer
+
+Download `NativeAEPThumbnail-<version>-Setup.exe` from
+[Releases](https://github.com/motionthunder/native-aep-thumbnail/releases) and
+run it. Setup:
+
+- installs to `Program Files\AepThumb` and registers the handler machine-wide;
+- offers to switch on the After Effects scripting setting rendering needs,
+  after asking you to close After Effects if it is open, and backing up its
+  preferences file first (`… Prefs.txt.aepthumb-backup`);
+- adds Start menu entries: **Turn previews on or off**, **Check setup**,
+  **Project page**;
+- optionally refreshes thumbnails Explorer has already drawn.
+
+Uninstall from *Settings → Apps* puts the previous `.aep` handler back and
+asks whether to keep the preview cache.
+
+Silent install for deployment:
+
+```bat
+NativeAEPThumbnail-0.1.0-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="scripting"
+```
+
 ### From source
 
 Needs Visual Studio 2022 C++ build tools and the Windows SDK.
@@ -115,21 +151,22 @@ build.cmd
 install.cmd     :: asks for elevation
 ```
 
-### Build a redistributable installer
+### Build the installer
 
-With [Inno Setup 6](https://jrsoftware.org/isdl.php):
+Needs [Inno Setup 6](https://jrsoftware.org/isdl.php)
+(`winget install JRSoftware.InnoSetup`).
 
 ```bat
-build.cmd
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\AepThumb.iss
+make-installer.cmd
 ```
 
-Produces `installer\Output\AepThumb-Setup.exe` — a single file to hand to
-someone else. It installs to Program Files, registers the handler
-machine-wide, adds a self-check shortcut, and reverses everything on uninstall.
+Builds the binaries and produces `dist\NativeAEPThumbnail-<version>-Setup.exe`.
+The version lives in `src\version.h` and `installer\AepThumb.iss`; bump both.
+Installer artwork is generated from `docs\banner.png` by
+`installer\assets\make-assets.ps1`.
 
-Note that the installer is unsigned unless you sign it, so SmartScreen will
-warn on first run.
+The installer is not code-signed, so SmartScreen warns on first run. Signing
+`dist\*.exe` with a code-signing certificate removes that.
 
 ### What installation touches
 
@@ -138,6 +175,7 @@ warn on first run.
 | `HKLM\Software\Classes\CLSID\{8E76F525-…}` | the COM class | the shell refuses to activate a thumbnail provider registered per-user |
 | `HKLM\Software\Classes\.aep\ShellEx\{e357fccd-…}` | the association, for `.aep`, `.aet` and the AE ProgID | so it works for every user on the machine |
 | `%LOCALAPPDATA%\AepThumb\` | cache, queue, spool, logs | per-user, disposable |
+| `%APPDATA%\Adobe\After Effects\<ver>\… Prefs.txt` | one setting, only if you let setup change it | rendering needs scripts to be allowed to write files; a backup is kept beside it |
 
 Process isolation is **left on** — there is no `DisableProcessIsolation`, so a
 fault in this DLL cannot take Explorer down with it.
@@ -158,6 +196,7 @@ aepbake --queue <project.aep>    bake one project
 aepbake --doctor                 check the whole setup
 aepbake --status                 cache and queue counts
 aepbake --clear                  drop cached frames so they re-bake
+aepbake --enable-scripting       turn on the After Effects setting rendering needs
 ```
 
 `--scan` is only for warming a library up front; normal browsing does not need
@@ -309,11 +348,15 @@ src/aep.{h,cpp}         RIFX parser and main-comp heuristic
 src/cache.{h,cpp}       content-keyed cache, queue, spool, baker mutex
 src/render.{h,cpp}      tile drawing: baked frame, or the placeholder card
 src/thumb.cpp           COM thumbnail provider, registration, spool-and-queue
-src/bake.cpp            aepbake.exe: queue, batching, watch, doctor
+src/bake.cpp            aepbake.exe: queue, batching, watch, doctor, AE setting
+src/version.h           version number and publisher, shared by the resources
+src/*.rc                version info and icon for the binaries
 tools/bake_batch.jsx    the script After Effects runs
 tools/aepinfo.cpp       CLI: dump a project, render its tile
-installer/AepThumb.iss  Inno Setup script for the redistributable
+installer/AepThumb.iss  Inno Setup script for the end-user installer
+installer/assets/       installer artwork and the script that generates it
 build.cmd               build all three binaries
+make-installer.cmd      build, then produce dist\...-Setup.exe
 install.cmd             register (elevates)
 uninstall.cmd           unregister and remove
 toggle.cmd              panic switch: off, then on again

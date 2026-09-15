@@ -357,6 +357,15 @@ bool SetStringValue(HKEY root, const std::wstring& subkey,
     return rc == ERROR_SUCCESS;
 }
 
+bool AssociationIsOurs(HKEY root, const std::wstring& subkey) {
+    wchar_t value[256];
+    DWORD cb = sizeof(value);
+    if (RegGetValueW(root, subkey.c_str(), NULL, RRF_RT_REG_SZ, NULL, value, &cb)
+            != ERROR_SUCCESS)
+        return false;
+    return _wcsicmp(value, kClsidText) == 0;
+}
+
 // The ProgID carries the AE version (Adobe.AfterEffects.Project.25), so read
 // it rather than hard-coding it. The ProgID wins over the extension when the
 // shell resolves a handler, so both get registered.
@@ -462,21 +471,28 @@ STDAPI DllUnregisterServer() {
     for (size_t i = 0; i < keys.size(); ++i) {
         std::wstring k = keys[i] + L"\\ShellEx\\" + kThumbIface;
 
-        // Put back whoever held the association before we took it.
-        wchar_t prev[256];
-        DWORD cb = sizeof(prev);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, backupKey.c_str(), keys[i].c_str(),
-                         RRF_RT_REG_SZ, NULL, prev, &cb) == ERROR_SUCCESS) {
-            SetStringValue(HKEY_LOCAL_MACHINE, k, NULL, prev);
-        } else {
-            RegDeleteKeyW(HKEY_LOCAL_MACHINE, k.c_str());
-            DeleteKeyIfEmpty(HKEY_LOCAL_MACHINE, keys[i] + L"\\ShellEx");
+        // Only an association that points at us is ours to undo. Unregistering
+        // twice - the panic switch followed by uninstall, say - must not delete
+        // whichever handler was put back the first time.
+        if (AssociationIsOurs(HKEY_LOCAL_MACHINE, k)) {
+            wchar_t prev[256];
+            DWORD cb = sizeof(prev);
+            if (RegGetValueW(HKEY_LOCAL_MACHINE, backupKey.c_str(), keys[i].c_str(),
+                             RRF_RT_REG_SZ, NULL, prev, &cb) == ERROR_SUCCESS) {
+                SetStringValue(HKEY_LOCAL_MACHINE, k, NULL, prev);
+            } else {
+                RegDeleteKeyW(HKEY_LOCAL_MACHINE, k.c_str());
+                DeleteKeyIfEmpty(HKEY_LOCAL_MACHINE, keys[i] + L"\\ShellEx");
+            }
         }
 
-        // Older builds wrote the association per-user; clear that too.
-        RegDeleteKeyW(HKEY_CURRENT_USER, k.c_str());
-        DeleteKeyIfEmpty(HKEY_CURRENT_USER, keys[i] + L"\\ShellEx");
-        DeleteKeyIfEmpty(HKEY_CURRENT_USER, keys[i]);
+        // Older builds wrote the association per-user; clear that too, under
+        // the same rule.
+        if (AssociationIsOurs(HKEY_CURRENT_USER, k)) {
+            RegDeleteKeyW(HKEY_CURRENT_USER, k.c_str());
+            DeleteKeyIfEmpty(HKEY_CURRENT_USER, keys[i] + L"\\ShellEx");
+            DeleteKeyIfEmpty(HKEY_CURRENT_USER, keys[i]);
+        }
     }
 
     HKEY roots[2] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };

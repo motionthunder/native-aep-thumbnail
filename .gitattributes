@@ -5,3 +5,6 @@
 *.jsx  text eol=crlf
 *.def  text eol=crlf
 *.png  binary
+*.bmp  binary
+*.ico  binary
+*.ps1  text eol=crlf

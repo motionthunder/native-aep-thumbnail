@@ -1,38 +1,42 @@
-AepThumb shows the real rendered content of After Effects projects as
-thumbnails in Windows Explorer.
+NATIVE AEP THUMBNAIL - beta 0.1.0
+Real previews for your .aep files, right in Windows Explorer.
 
-How it works, in short
-----------------------
-An .aep file contains no picture of any kind - only the project structure.
-Nothing but After Effects can turn it into an image. So AepThumb renders one
-frame per project in the background, stores it in a per-user cache, and the
-Explorer thumbnail handler then simply shows that cached frame instantly.
 
-The first time a folder of projects is browsed, tiles appear as placeholder
-cards and are replaced by real frames a few seconds later, as they finish
-rendering. After that they are instant and stay cached until the project is
-edited.
+WHAT YOU GET
+After installing, folders with After Effects projects show what is actually
+inside each project - a rendered frame - instead of the plain Ae icon.
 
-Requirements
-------------
+
+HOW IT WORKS
+An .aep file contains no picture of any kind, only the project itself. So the
+first time a project is seen, After Effects quietly renders one frame of it in
+the background. That takes a few seconds; after that the preview is instant
+and stays until the project is edited.
+
+Rendering pauses while After Effects is open, so your work is never disturbed.
+
+
+YOU NEED
 - Windows 10 or 11, 64-bit
 - Adobe After Effects installed
-- In After Effects: Edit > Preferences > Scripting and Expressions >
-  "Allow Scripts to Write Files and Access Network" must be enabled.
-  Rendering cannot work without it.
 
-Good to know
-------------
-- Rendering pauses while After Effects is open, so your own session is never
-  disturbed. It resumes afterwards.
-- The first render of each project takes a few seconds. After Effects is
-  started once for a batch, not once per file.
-- Setup takes over .aep thumbnails machine-wide. If another program already
-  handled them, that setting is saved and restored when you uninstall.
+On the next page you can let setup switch on the After Effects setting
+"Allow Scripts to Write Files and Access Network". Rendering previews does
+not work without it. Setup keeps a backup of your After Effects preferences
+before changing anything.
 
-Licence and trademarks
-----------------------
-AepThumb is open source and free, under the MIT licence.
+
+GOOD TO KNOW
+- Previews can be switched off and back on at any time from the Start menu:
+  "Turn previews on or off".
+- Uninstalling puts everything back exactly as it was.
+- If a project's media is on a drive that is not connected, After Effects
+  draws its own "media offline" colour bars, and that is what the preview
+  shows.
+
+
+Free and open source (MIT License).
+https://github.com/motionthunder/native-aep-thumbnail
 
 Adobe and After Effects are trademarks or registered trademarks of Adobe Inc.
 in the United States and/or other countries. This project is not affiliated

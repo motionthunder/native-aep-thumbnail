@@ -14,6 +14,7 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <string>
@@ -401,12 +402,134 @@ int ScriptingPrefState(std::wstring* detail) {
     return state;
 }
 
+bool ProcessRunning(const wchar_t* exeName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, exeName) == 0) { found = true; break; }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
 bool AfterFxRunning() {
     // A script sent to a running instance would execute inside the user's own
-    // session and disrupt it, so the baker stands down instead.
-    HWND w = FindWindowW(L"AE_CApplication_11.0", NULL);
-    if (w) return true;
-    return FindWindowW(NULL, L"Adobe After Effects") != NULL;
+    // session and disrupt it, so the baker stands down instead. Checked by
+    // process, not by window: the main window's title carries the project
+    // name, so no fixed title or guessed class name matches it reliably.
+    return ProcessRunning(L"AfterFX.exe");
+}
+
+// Turns on "Allow Scripts to Write Files and Access Network" in every After
+// Effects preferences file for this user. Nothing can be rendered without it,
+// and the people this is distributed to should not have to find the setting.
+//
+// After Effects rewrites its preferences when it quits, so this refuses to run
+// while it is open. Each file is backed up once before its first change.
+//
+// Returns 0 enabled or already on, 2 no preferences found (After Effects has
+// never been started), 3 After Effects is running, 4 a file could not be
+// written.
+int EnableScriptingPref() {
+    static const char kKey[] = "\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\"";
+    static const char kSection[] = "[\"Main Pref Section v2\"]";
+
+    if (AfterFxRunning()) {
+        wprintf(L"After Effects is open. Close it and run this again.\n");
+        return 3;
+    }
+
+    wchar_t appdata[MAX_PATH * 2];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, ARRAYSIZE(appdata));
+    if (n == 0 || n >= ARRAYSIZE(appdata)) return 2;
+
+    std::wstring base = std::wstring(appdata) + L"\\Adobe\\After Effects";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((base + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        wprintf(L"No After Effects preferences yet. Start After Effects once, "
+                L"close it, then run this again.\n");
+        return 2;
+    }
+
+    int files = 0, failures = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        std::wstring ver = fd.cFileName;
+        if (ver == L"." || ver == L"..") continue;
+
+        std::wstring prefs = base + L"\\" + ver + L"\\Adobe After Effects " +
+                             ver + L" Prefs.txt";
+        std::vector<unsigned char> raw;
+        if (!ReadFileBytes(prefs, raw) || raw.empty()) continue;
+        ++files;
+
+        std::string text(reinterpret_cast<char*>(&raw[0]), raw.size());
+        std::string updated = text;
+
+        size_t p = text.find(kKey);
+        if (p != std::string::npos) {
+            size_t eq  = text.find('=', p);
+            size_t eol = text.find_first_of("\r\n", p);
+            if (eol == std::string::npos) eol = text.size();
+            if (eq == std::string::npos || eq > eol) {
+                wprintf(L"  AE %s: unexpected format, left alone\n", ver.c_str());
+                ++failures;
+                continue;
+            }
+            std::string value = text.substr(eq + 1, eol - eq - 1);
+            if (value.find("\"1\"") != std::string::npos) {
+                wprintf(L"  AE %s: already enabled\n", ver.c_str());
+                continue;
+            }
+            updated = text.substr(0, eq + 1) + " \"1\"" + text.substr(eol);
+        } else {
+            size_t s = text.find(kSection);
+            if (s == std::string::npos) {
+                wprintf(L"  AE %s: preferences section not found, left alone\n",
+                        ver.c_str());
+                ++failures;
+                continue;
+            }
+            size_t lineEnd = text.find('\n', s);
+            if (lineEnd == std::string::npos) {
+                ++failures;
+                continue;
+            }
+            const char* eolSeq = (lineEnd > 0 && text[lineEnd - 1] == '\r') ? "\r\n" : "\n";
+            updated = text.substr(0, lineEnd + 1) + "\t" + kKey + " = \"1\"" + eolSeq +
+                      text.substr(lineEnd + 1);
+        }
+
+        std::wstring backup = prefs + L".aepthumb-backup";
+        if (GetFileAttributesW(backup.c_str()) == INVALID_FILE_ATTRIBUTES)
+            CopyFileW(prefs.c_str(), backup.c_str(), TRUE);
+
+        // Write beside, then swap, so a failure never leaves a half-written
+        // preferences file behind.
+        std::wstring tmp = prefs + L".aepthumb-tmp";
+        if (!WriteTextFile(tmp, updated) ||
+            !MoveFileExW(tmp.c_str(), prefs.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            DeleteFileW(tmp.c_str());
+            wprintf(L"  AE %s: could not write preferences\n", ver.c_str());
+            ++failures;
+            continue;
+        }
+        wprintf(L"  AE %s: enabled\n", ver.c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+
+    if (files == 0) {
+        wprintf(L"No After Effects preferences yet. Start After Effects once, "
+                L"close it, then run this again.\n");
+        return 2;
+    }
+    return failures > 0 ? 4 : 0;
 }
 
 bool RunAfterFx(const std::wstring& script) {
@@ -708,6 +831,8 @@ void PrintUsage() {
             L"  aepbake --status                 show cache and queue counts\n"
             L"  aepbake --doctor                 check the whole setup\n"
             L"  aepbake --clear                  drop cached frames so they re-bake\n"
+            L"  aepbake --enable-scripting       turn on the After Effects setting\n"
+            L"                                   that rendering needs\n"
             L"\n"
             L"Baking pauses while After Effects is open, so your session is never\n"
             L"disturbed; it resumes on the next scan or change.\n");
@@ -769,6 +894,8 @@ int wmain(int argc, wchar_t** argv) {
         return RunWatch(dirs, recurse);
     }
 
+    if (mode == L"--enable-scripting") return EnableScriptingPref();
+
     if (mode == L"--clear") {
         // Frames rendered while a footage drive was offline show After Effects'
         // media-offline colour bars. Dropping them makes those projects bake
@@ -806,9 +933,10 @@ int wmain(int argc, wchar_t** argv) {
             wprintf(L"  [ ok ] Scripts may write files (AE %s)\n", ver.c_str());
         } else if (pref == 0) {
             wprintf(L"  [FAIL] After Effects blocks scripts from writing files.\n");
-            wprintf(L"         Turn on: Edit > Preferences > Scripting and Expressions >\n");
-            wprintf(L"         \"Allow Scripts to Write Files and Access Network\",\n");
-            wprintf(L"         then restart After Effects. Without it every bake fails.\n");
+            wprintf(L"         Close After Effects and run: aepbake --enable-scripting\n");
+            wprintf(L"         or turn on Edit > Preferences > Scripting and Expressions >\n");
+            wprintf(L"         \"Allow Scripts to Write Files and Access Network\".\n");
+            wprintf(L"         Without it every bake fails.\n");
         } else {
             wprintf(L"  [ ?? ] Could not read After Effects preferences.\n");
             wprintf(L"         Run After Effects once, then check again.\n");

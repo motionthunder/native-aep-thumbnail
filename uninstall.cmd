@@ -14,7 +14,7 @@ set "OLD=%LOCALAPPDATA%\AepThumb"
 
 if exist "%DEST%\aepthumb.dll" regsvr32 /s /u "%DEST%\aepthumb.dll"
 if exist "%OLD%\aepthumb.dll"  regsvr32 /s /u "%OLD%\aepthumb.dll"
-taskkill /f /im dllhost.exe >nul 2>&1
+taskkill /f /fi "imagename eq dllhost.exe" /fi "modules eq aepthumb.dll" >nul 2>&1
 
 del /q "%DEST%\aepthumb.dll" 2>nul
 rd "%DEST%" 2>nul

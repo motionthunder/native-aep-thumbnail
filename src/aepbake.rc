@@ -1,0 +1,7 @@
+#define AEPT_FILE_DESC     "Native AEP Thumbnail - background preview renderer"
+#define AEPT_ORIGINAL_NAME "aepbake.exe"
+#define AEPT_FILETYPE      VFT_APP
+#include "versioninfo.rc"
+
+// Paths are relative to the repository root, where build.cmd runs rc.
+1 ICON "installer\\assets\\app.ico"
